@@ -1,4 +1,5 @@
-module kafka
+module github.com/CppUser/kafka
+
 
 go 1.23.1
 
