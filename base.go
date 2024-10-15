@@ -175,7 +175,7 @@ func (kc *Client) ConsumeResponses(service string) {
 
 func (kc *Client) HandleUserResponse() {
 	//topic := fmt.Sprintf("%s_responses", service)
-	consumer, err := kc.Consumer.ConsumePartition("user_responses", 0, sarama.OffsetNewest)
+	consumer, err := kc.Consumer.ConsumePartition("user_service_requests", 0, sarama.OffsetNewest)
 	if err != nil {
 		log.Fatalf("failed to start consumer for user_responses topic: %v", err)
 	}
