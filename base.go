@@ -7,7 +7,6 @@ import (
 	"github.com/google/uuid"
 	"log"
 	"sync"
-	"time"
 )
 
 type Message struct {
@@ -21,7 +20,7 @@ type Client struct {
 	Producer      sarama.SyncProducer
 	Consumer      sarama.Consumer
 	waitGroup     sync.WaitGroup
-	responseChans map[string]chan *Message // Used for waiting for responses per RequestID
+	responseChans map[string]chan *Message
 	mux           sync.Mutex
 }
 
@@ -63,10 +62,10 @@ func (kc *Client) Close() error {
 
 /////////////////////////REFACTOR MOVE TO ITS OWN FILES////////////////////////////////////
 
-func (p *Client) SendMessage(serviceName, action, payload string) error {
+func (kc *Client) SendMessage(service, action, payload string) error {
 	message := Message{
 		RequestID: uuid.New().String(),
-		Service:   serviceName,
+		Service:   service,
 		Action:    action,
 		Payload:   payload,
 	}
@@ -76,14 +75,14 @@ func (p *Client) SendMessage(serviceName, action, payload string) error {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	topic := fmt.Sprintf("%s_requests", serviceName)
+	topic := fmt.Sprintf("%s_requests", service)
 
 	kmsg := &sarama.ProducerMessage{
 		Topic: topic,
 		Value: sarama.ByteEncoder(msgBt),
 	}
 
-	partition, offset, err := p.Producer.SendMessage(kmsg)
+	partition, offset, err := kc.Producer.SendMessage(kmsg)
 	if err != nil {
 		return err
 	}
@@ -91,56 +90,54 @@ func (p *Client) SendMessage(serviceName, action, payload string) error {
 	return nil
 }
 
-func (kc *Client) SendMessageWithResponse(service, action, payload string) (*Message, error) {
-
-	requestID := uuid.New().String()
-	message := Message{
-		RequestID: requestID,
-		Service:   service,
-		Action:    action,
-		Payload:   payload,
-	}
-
-	messageBytes, err := json.Marshal(message)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal message: %w", err)
-	}
-
-	topic := fmt.Sprintf("%s_requests", service)
-	kafkaMessage := &sarama.ProducerMessage{
-		Topic: topic,
-		Value: sarama.ByteEncoder(messageBytes),
-	}
-
-	// Send the message to Kafka
-	partition, offset, err := kc.Producer.SendMessage(kafkaMessage)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send message to Kafka: %w", err)
-	}
-
-	log.Printf("Message sent to partition %d at offset %d", partition, offset)
-
-	// Prepare a response channel and store it using the RequestID
-	responseChan := make(chan *Message, 1)
-	kc.mux.Lock()
-	kc.responseChans[requestID] = responseChan
-	kc.mux.Unlock()
-
-	// Wait for the response from the appropriate response topic
-	select {
-	case response := <-responseChan:
-		return response, nil
-	case <-time.After(10 * time.Second): // Timeout after 10 seconds
-		// Remove the response channel after timeout to avoid memory leaks
-		kc.mux.Lock()
-		delete(kc.responseChans, requestID)
-		kc.mux.Unlock()
-		return nil, fmt.Errorf("timeout waiting for response for request ID %s", requestID)
-	}
-}
-
-func (kc *Client) ConsumeResponses(service string) {
-	topic := fmt.Sprintf("%s_responses", service)
+// func (kc *Client) SendMessageWithResponse(service, action, payload string) (*Message, error) {
+//
+//		requestID := uuid.New().String()
+//		message := Message{
+//			RequestID: requestID,
+//			Service:   service,
+//			Action:    action,
+//			Payload:   payload,
+//		}
+//
+//		messageBytes, err := json.Marshal(message)
+//		if err != nil {
+//			return nil, fmt.Errorf("failed to marshal message: %w", err)
+//		}
+//
+//		topic := fmt.Sprintf("%s_requests", service)
+//		kafkaMessage := &sarama.ProducerMessage{
+//			Topic: topic,
+//			Value: sarama.ByteEncoder(messageBytes),
+//		}
+//
+//		// Send the message to Kafka
+//		partition, offset, err := kc.Producer.SendMessage(kafkaMessage)
+//		if err != nil {
+//			return nil, fmt.Errorf("failed to send message to Kafka: %w", err)
+//		}
+//
+//		log.Printf("Message sent to partition %d at offset %d", partition, offset)
+//
+//		// Prepare a response channel and store it using the RequestID
+//		responseChan := make(chan *Message, 1)
+//		kc.mux.Lock()
+//		kc.responseChans[requestID] = responseChan
+//		kc.mux.Unlock()
+//
+//		// Wait for the response from the appropriate response topic
+//		select {
+//		case response := <-responseChan:
+//			return response, nil
+//		case <-time.After(10 * time.Second): // Timeout after 10 seconds
+//			// Remove the response channel after timeout to avoid memory leaks
+//			kc.mux.Lock()
+//			delete(kc.responseChans, requestID)
+//			kc.mux.Unlock()
+//			return nil, fmt.Errorf("timeout waiting for response for request ID %s", requestID)
+//		}
+//	}
+func (kc *Client) Consume(topic string, handler func(*Message) *Message) {
 	partitionConsumer, err := kc.Consumer.ConsumePartition(topic, 0, sarama.OffsetNewest)
 	if err != nil {
 		log.Fatalf("Failed to start consumer for topic %s: %v", topic, err)
@@ -157,19 +154,30 @@ func (kc *Client) ConsumeResponses(service string) {
 		}
 
 		// Log the message for debugging
-		log.Printf("Received response from Kafka: %+v", msg)
+		log.Printf("Received message from Kafka: %+v", msg)
 
-		// Check if there's a waiting channel for the response
-		kc.mux.Lock()
-		if responseChan, ok := kc.responseChans[msg.RequestID]; ok {
-			// Send the response to the waiting channel
-			responseChan <- &msg
-			close(responseChan)
-			delete(kc.responseChans, msg.RequestID)
-		} else {
-			log.Printf("No waiting response channel for RequestID %s", msg.RequestID)
+		// Handle the message and get the response
+		if handler != nil {
+			response := handler(&msg)
+			if response != nil {
+				responseBytes, err := json.Marshal(response)
+				if err != nil {
+					log.Printf("Failed to marshal response message: %v", err)
+					continue
+				}
+
+				responseTopic := fmt.Sprintf("%s_responses", msg.Service)
+				kafkaMessage := &sarama.ProducerMessage{
+					Topic: responseTopic,
+					Value: sarama.ByteEncoder(responseBytes),
+				}
+
+				_, _, err = kc.Producer.SendMessage(kafkaMessage)
+				if err != nil {
+					log.Printf("Failed to send response to Kafka: %v", err)
+				}
+			}
 		}
-		kc.mux.Unlock()
 	}
 }
 
