@@ -6,6 +6,7 @@ import (
 	"github.com/IBM/sarama"
 	"github.com/google/uuid"
 	"log"
+	"strings"
 	"sync"
 )
 
@@ -109,8 +110,9 @@ func (kc *Client) Consume(topic string, handler func(*Message) *Message) {
 		// Log the message for debugging
 		log.Printf("Received message from Kafka: %+v", msg)
 
-		// Handle the message and get the response
-		if handler != nil {
+		// If this is a request (not already a response)
+		if !strings.HasSuffix(topic, "_responses") && handler != nil {
+			// Handle the message and get the response
 			response := handler(&msg)
 			if response != nil {
 				responseBytes, err := json.Marshal(response)
@@ -119,6 +121,7 @@ func (kc *Client) Consume(topic string, handler func(*Message) *Message) {
 					continue
 				}
 
+				// Only send responses to response topics
 				responseTopic := fmt.Sprintf("%s_responses", msg.Service)
 				kafkaMessage := &sarama.ProducerMessage{
 					Topic: responseTopic,
@@ -152,6 +155,9 @@ func (kc *Client) ConsumeResponses(serviceHandlers map[string]func(*Message)) {
 					log.Printf("Failed to unmarshal message for topic %s: %v", topic, err)
 					continue
 				}
+
+				// Log the received response
+				log.Printf("Received response from Kafka: %+v", msg)
 
 				// Call the handler for this message
 				handler(&msg)
