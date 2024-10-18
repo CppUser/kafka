@@ -6,7 +6,6 @@ import (
 	"github.com/IBM/sarama"
 	"github.com/google/uuid"
 	"log"
-	"strings"
 	"sync"
 )
 
@@ -91,28 +90,32 @@ func (kc *Client) SendMessage(service, action, payload string) error {
 	return nil
 }
 
-func (kc *Client) Consume(topic string, handler func(*Message) *Message) {
+func (kc *Client) Consume(topic string, actionHandlers map[string]func(*Message) *Message) {
 	partitionConsumer, err := kc.Consumer.ConsumePartition(topic, 0, sarama.OffsetNewest)
 	if err != nil {
 		log.Fatalf("Failed to start consumer for topic %s: %v", topic, err)
 	}
 
-	defer partitionConsumer.Close()
+	defer func(partitionConsumer sarama.PartitionConsumer) {
+		err := partitionConsumer.Close()
+		if err != nil {
+			log.Fatalf("Failed to close partition consumer for topic %s: %v", topic, err)
+		}
+	}(partitionConsumer)
 
 	for message := range partitionConsumer.Messages() {
 		var msg Message
 		err := json.Unmarshal(message.Value, &msg)
 		if err != nil {
-			log.Printf("failed to unmarshal message: %v", err)
+			log.Printf("Failed to unmarshal message for topic %s: %v", topic, err)
 			continue
 		}
 
-		// Log the message for debugging
+		// Log the received message
 		log.Printf("Received message from Kafka: %+v", msg)
 
-		// If this is a request (not already a response)
-		if !strings.HasSuffix(topic, "_responses") && handler != nil {
-			// Handle the message and get the response
+		// Find the handler for the specific action
+		if handler, ok := actionHandlers[msg.Action]; ok {
 			response := handler(&msg)
 			if response != nil {
 				responseBytes, err := json.Marshal(response)
@@ -121,7 +124,6 @@ func (kc *Client) Consume(topic string, handler func(*Message) *Message) {
 					continue
 				}
 
-				// Only send responses to response topics
 				responseTopic := fmt.Sprintf("%s_responses", msg.Service)
 				kafkaMessage := &sarama.ProducerMessage{
 					Topic: responseTopic,
@@ -133,6 +135,8 @@ func (kc *Client) Consume(topic string, handler func(*Message) *Message) {
 					log.Printf("Failed to send response to Kafka: %v", err)
 				}
 			}
+		} else {
+			log.Printf("No handler found for action: %s", msg.Action)
 		}
 	}
 }
