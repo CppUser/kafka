@@ -62,9 +62,10 @@ func (kc *Client) Close() error {
 
 /////////////////////////REFACTOR MOVE TO ITS OWN FILES////////////////////////////////////
 
-func (kc *Client) SendMessage(service, action, payload string) error {
+func (kc *Client) SendMessage(service, action, payload string) (string, error) {
+	requestID := uuid.New().String()
 	message := Message{
-		RequestID: uuid.New().String(),
+		RequestID: requestID,
 		Service:   service,
 		Action:    action,
 		Payload:   payload,
@@ -72,7 +73,7 @@ func (kc *Client) SendMessage(service, action, payload string) error {
 
 	msgBt, err := json.Marshal(message)
 	if err != nil {
-		return fmt.Errorf("failed to marshal message: %w", err)
+		return "", fmt.Errorf("failed to marshal message: %w", err)
 	}
 
 	topic := fmt.Sprintf("%s_requests", service)
@@ -84,10 +85,11 @@ func (kc *Client) SendMessage(service, action, payload string) error {
 
 	partition, offset, err := kc.Producer.SendMessage(kmsg)
 	if err != nil {
-		return err
+		return "", err
 	}
 	log.Printf("Message sent to partition %d at offset %d\n", partition, offset)
-	return nil
+
+	return requestID, nil
 }
 
 func (kc *Client) Consume(topic string, actionHandlers map[string]func(*Message) *Message) {
