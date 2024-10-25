@@ -171,3 +171,24 @@ func (kc *Client) ConsumeResponses(serviceHandlers map[string]func(*Message)) {
 		}(service, handler)
 	}
 }
+
+func (kc *Client) SetResponseChan(requestID string, responseChan chan *Message) {
+	kc.mux.Lock()
+	defer kc.mux.Unlock()
+	kc.responseChans[requestID] = responseChan
+}
+
+// GetResponseChan retrieves a response channel for a given request ID
+func (kc *Client) GetResponseChan(requestID string) (chan *Message, bool) {
+	kc.mux.Lock()
+	defer kc.mux.Unlock()
+	responseChan, exists := kc.responseChans[requestID]
+	return responseChan, exists
+}
+
+// DeleteResponseChan removes a response channel for a given request ID
+func (kc *Client) DeleteResponseChan(requestID string) {
+	kc.mux.Lock()
+	defer kc.mux.Unlock()
+	delete(kc.responseChans, requestID)
+}
